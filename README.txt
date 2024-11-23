@@ -1,45 +1,22 @@
-Do at least ONE of the following tasks: refactor is mandatory. Write tests is optional, will be good bonus to see it. 
-Please do not invest more than 2-4 hours on this.
-Upload your results to a Github repo, for easier sharing and reviewing.
+========================================CODE REFACTOR========================================
 
-Thank you and good luck!
+########## Strengths ##########
+1. Proper separation of concerns with repository pattern.
+2. Clear naming conventions for methods, making the purpose of each method easy to understand.
+3. Dependency injection used for `BookingRepository` promotes testability and decoupling.
 
+########## Weaknesses ##########
+1. Repetitive Code
+2. Lack of Validation
+3. Poor Exception Handling
+4. Magic Strings: jobid and admincommen
+5. Environmental Dependency: env
+6. Formatting Issues
 
-
-Code to refactor
-=================
-1) app/Http/Controllers/BookingController.php
-2) app/Repository/BookingRepository.php
-
-Code to write tests (optional)
-=====================
-3) App/Helpers/TeHelper.php method willExpireAt
-4) App/Repository/UserRepository.php, method createOrUpdate
-
-
-----------------------------
-
-What I expect in your repo:
-
-X. A readme with:   Your thoughts about the code. What makes it amazing code. Or what makes it ok code. Or what makes it terrible code. How would you have done it. Thoughts on formatting, structure, logic.. The more details that you can provide about the code (what's terrible about it or/and what is good about it) the easier for us to assess your coding style, mentality etc
-
-And 
-
-Y.  Refactor it if you feel it needs refactoring. The more love you put into it. The easier for us to asses your thoughts, code principles etc
-
-
-IMPORTANT: Make two commits. First commit with original code. Second with your refactor so we can easily trace changes. 
-
-
-NB: you do not need to set up the code on local and make the web app run. It will not run as its not a complete web app. This is purely to assess you thoughts about code, formatting, logic etc
-
-
-===== So expected output is a GitHub link with either =====
-
-1. Readme described above (point X above) + refactored code 
-OR
-2. Readme described above (point X above) + refactored core + a unit test of the code that we have sent
-
-Thank you!
-
-
+########## Suggestions ##########
+- Introduce Form Requests for validation
+- Extract repetitive logic into helper methods or services
+- Replace hardcoded values with constants
+- Enhance error handling by logging exceptions and returning consistent error responses
+- Improve adherence to RESTful conventions
+- Standardize response formats use JSON returns

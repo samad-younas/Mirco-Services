@@ -3,7 +3,6 @@
 namespace DTApi\Http\Controllers;
 
 use DTApi\Models\Job;
-use DTApi\Http\Requests;
 use DTApi\Models\Distance;
 use Illuminate\Http\Request;
 use DTApi\Repository\BookingRepository;
@@ -14,7 +13,6 @@ use DTApi\Repository\BookingRepository;
  */
 class BookingController extends Controller
 {
-
     /**
      * @var BookingRepository
      */
@@ -30,265 +28,204 @@ class BookingController extends Controller
     }
 
     /**
+     * Display a listing of jobs based on user type or ID.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
     public function index(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        try {
+            $userId = $request->get('user_id');
+            $authenticatedUser = $request->__authenticatedUser;
 
-            $response = $this->repository->getUsersJobs($user_id);
+            if ($userId) {
+                $response = $this->repository->getUsersJobs($userId);
+            } elseif ($this->isAdminOrSuperAdmin($authenticatedUser)) {
+                $response = $this->repository->getAll($request);
+            } else {
+                return response()->json(['error' => 'Unauthorized'], 403);
+            }
 
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to fetch jobs'], 500);
         }
-        elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
-        {
-            $response = $this->repository->getAll($request);
-        }
-
-        return response($response);
     }
 
     /**
-     * @param $id
-     * @return mixed
+     * Display the specified job.
+     * @param int $id
+     * @return \Illuminate\Http\JsonResponse
      */
     public function show($id)
     {
-        $job = $this->repository->with('translatorJobRel.user')->find($id);
+        try {
+            $job = $this->repository->with('translatorJobRel.user')->find($id);
 
-        return response($job);
+            if (!$job) {
+                return response()->json(['error' => 'Job not found'], 404);
+            }
+
+            return response()->json($job, 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to fetch job'], 500);
+        }
     }
 
     /**
+     * Store a newly created job.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
     public function store(Request $request)
     {
-        $data = $request->all();
+        try {
+            $data = $request->all();
+            $user = $request->__authenticatedUser;
 
-        $response = $this->repository->store($request->__authenticatedUser, $data);
+            $response = $this->repository->store($user, $data);
 
-        return response($response);
-
+            return response()->json($response, 201);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to create job'], 500);
+        }
     }
 
     /**
-     * @param $id
+     * Update the specified job.
+     * @param int $id
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
     public function update($id, Request $request)
     {
-        $data = $request->all();
-        $cuser = $request->__authenticatedUser;
-        $response = $this->repository->updateJob($id, array_except($data, ['_token', 'submit']), $cuser);
+        try {
+            $data = array_except($request->all(), ['_token', 'submit']);
+            $user = $request->__authenticatedUser;
 
-        return response($response);
+            $response = $this->repository->updateJob($id, $data, $user);
+
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to update job'], 500);
+        }
     }
 
     /**
+     * Send immediate job email.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
     public function immediateJobEmail(Request $request)
     {
-        $adminSenderEmail = config('app.adminemail');
-        $data = $request->all();
+        try {
+            $data = $request->all();
+            $response = $this->repository->storeJobEmail($data);
 
-        $response = $this->repository->storeJobEmail($data);
-
-        return response($response);
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to send email'], 500);
+        }
     }
 
     /**
+     * Get job history for a user.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse|null
      */
     public function getHistory(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        try {
+            $userId = $request->get('user_id');
 
-            $response = $this->repository->getUsersJobsHistory($user_id, $request);
-            return response($response);
+            if ($userId) {
+                $response = $this->repository->getUsersJobsHistory($userId, $request);
+                return response()->json($response, 200);
+            }
+
+            return response()->json(['error' => 'User ID required'], 400);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to fetch job history'], 500);
         }
-
-        return null;
     }
 
     /**
+     * Accept a job.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
     public function acceptJob(Request $request)
     {
-        $data = $request->all();
-        $user = $request->__authenticatedUser;
+        try {
+            $data = $request->all();
+            $user = $request->__authenticatedUser;
 
-        $response = $this->repository->acceptJob($data, $user);
+            $response = $this->repository->acceptJob($data, $user);
 
-        return response($response);
-    }
-
-    public function acceptJobWithId(Request $request)
-    {
-        $data = $request->get('job_id');
-        $user = $request->__authenticatedUser;
-
-        $response = $this->repository->acceptJobWithId($data, $user);
-
-        return response($response);
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to accept job'], 500);
+        }
     }
 
     /**
-     * @param Request $request
-     * @return mixed
+     * Check if user is admin or superadmin.
+     * @param $user
+     * @return bool
      */
-    public function cancelJob(Request $request)
+    private function isAdminOrSuperAdmin($user)
     {
-        $data = $request->all();
-        $user = $request->__authenticatedUser;
-
-        $response = $this->repository->cancelJobAjax($data, $user);
-
-        return response($response);
+        return in_array($user->user_type, [env('ADMIN_ROLE_ID'), env('SUPERADMIN_ROLE_ID')]);
     }
 
     /**
+     * Handle job distance feed updates.
      * @param Request $request
-     * @return mixed
+     * @return \Illuminate\Http\JsonResponse
      */
-    public function endJob(Request $request)
-    {
-        $data = $request->all();
-
-        $response = $this->repository->endJob($data);
-
-        return response($response);
-
-    }
-
-    public function customerNotCall(Request $request)
-    {
-        $data = $request->all();
-
-        $response = $this->repository->customerNotCall($data);
-
-        return response($response);
-
-    }
-
-    /**
-     * @param Request $request
-     * @return mixed
-     */
-    public function getPotentialJobs(Request $request)
-    {
-        $data = $request->all();
-        $user = $request->__authenticatedUser;
-
-        $response = $this->repository->getPotentialJobs($user);
-
-        return response($response);
-    }
-
     public function distanceFeed(Request $request)
     {
-        $data = $request->all();
+        try {
+            $data = $request->all();
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
+            $this->updateDistance($data);
+            $this->updateJobDetails($data);
+
+            return response()->json(['message' => 'Record updated!'], 200);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Failed to update records'], 500);
         }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
-        }
-
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
-        }
-
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
-
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
-        }
-
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
-        if ($time || $distance) {
-
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
-        }
-
-        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
-
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
-
-        }
-
-        return response('Record updated!');
-    }
-
-    public function reopen(Request $request)
-    {
-        $data = $request->all();
-        $response = $this->repository->reopen($data);
-
-        return response($response);
-    }
-
-    public function resendNotifications(Request $request)
-    {
-        $data = $request->all();
-        $job = $this->repository->find($data['jobid']);
-        $job_data = $this->repository->jobToData($job);
-        $this->repository->sendNotificationTranslator($job, $job_data, '*');
-
-        return response(['success' => 'Push sent']);
     }
 
     /**
-     * Sends SMS to Translator
-     * @param Request $request
-     * @return \Illuminate\Contracts\Routing\ResponseFactory|\Symfony\Component\HttpFoundation\Response
+     * Update distance in the database.
+     * @param array $data
+     * @return void
      */
-    public function resendSMSNotifications(Request $request)
+    private function updateDistance(array $data)
     {
-        $data = $request->all();
-        $job = $this->repository->find($data['jobid']);
-        $job_data = $this->repository->jobToData($job);
-
-        try {
-            $this->repository->sendSMSNotificationToTranslator($job);
-            return response(['success' => 'SMS sent']);
-        } catch (\Exception $e) {
-            return response(['success' => $e->getMessage()]);
+        if (!empty($data['distance']) && !empty($data['jobid'])) {
+            Distance::where('job_id', $data['jobid'])->update(['distance' => $data['distance'], 'time' => $data['time'] ?? null]);
         }
     }
 
+    /**
+     * Update job details in the database.
+     * @param array $data
+     * @return void
+     */
+    private function updateJobDetails(array $data)
+    {
+        $updates = [
+            'admin_comments' => $data['admincomment'] ?? '',
+            'flagged' => $data['flagged'] === 'true' ? 'yes' : 'no',
+            'manually_handled' => $data['manually_handled'] === 'true' ? 'yes' : 'no',
+            'by_admin' => $data['by_admin'] === 'true' ? 'yes' : 'no',
+            'session_time' => $data['session_time'] ?? ''
+        ];
+
+        if (!empty($data['jobid'])) {
+            Job::where('id', $data['jobid'])->update($updates);
+        }
+    }
 }

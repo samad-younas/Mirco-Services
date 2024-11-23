@@ -58,66 +58,128 @@ class BookingRepository extends BaseRepository
     public function getUsersJobs($user_id)
     {
         $cuser = User::find($user_id);
-        $usertype = '';
-        $emergencyJobs = array();
-        $noramlJobs = array();
-        if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback')->whereIn('status', ['pending', 'assigned', 'started'])->orderBy('due', 'asc')->get();
-            $usertype = 'customer';
-        } elseif ($cuser && $cuser->is('translator')) {
-            $jobs = Job::getTranslatorJobs($cuser->id, 'new');
-            $jobs = $jobs->pluck('jobs')->all();
-            $usertype = 'translator';
-        }
-        if ($jobs) {
-            foreach ($jobs as $jobitem) {
-                if ($jobitem->immediate == 'yes') {
-                    $emergencyJobs[] = $jobitem;
-                } else {
-                    $noramlJobs[] = $jobitem;
-                }
-            }
-            $noramlJobs = collect($noramlJobs)->each(function ($item, $key) use ($user_id) {
-                $item['usercheck'] = Job::checkParticularJob($user_id, $item);
-            })->sortBy('due')->all();
+        if (!$cuser) {
+            return ['emergencyJobs' => [], 'normalJobs' => [], 'cuser' => null, 'usertype' => null];
         }
 
-        return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'cuser' => $cuser, 'usertype' => $usertype];
+        $jobs = [];
+        $usertype = $cuser->is('customer') ? 'customer' : ($cuser->is('translator') ? 'translator' : null);
+
+        if ($usertype === 'customer') {
+            $jobs = $this->getCustomerJobs($cuser);
+        } elseif ($usertype === 'translator') {
+            $jobs = $this->getTranslatorJobs($cuser->id);
+        }
+
+        return $this->categorizeJobs($jobs, $user_id, $cuser, $usertype);
     }
+
+    private function getCustomerJobs($cuser)
+    {
+        return $cuser->jobs()
+            ->with(['user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback'])
+            ->whereIn('status', ['pending', 'assigned', 'started'])
+            ->orderBy('due', 'asc')
+            ->get();
+    }
+
+    private function getTranslatorJobs($translator_id)
+    {
+        return Job::getTranslatorJobs($translator_id, 'new')->pluck('jobs')->all();
+    }
+
+    private function categorizeJobs($jobs, $user_id, $cuser, $usertype)
+    {
+        $emergencyJobs = [];
+        $normalJobs = [];
+
+        foreach ($jobs as $job) {
+            if ($job->immediate === 'yes') {
+                $emergencyJobs[] = $job;
+            } else {
+                $normalJobs[] = $job;
+            }
+        }
+
+        $normalJobs = collect($normalJobs)
+            ->each(function ($job) use ($user_id) {
+                $job['usercheck'] = Job::checkParticularJob($user_id, $job);
+            })
+            ->sortBy('due')
+            ->all();
+
+        return [
+            'emergencyJobs' => $emergencyJobs,
+            'normalJobs' => $normalJobs,
+            'cuser' => $cuser,
+            'usertype' => $usertype
+        ];
+    }
+
 
     /**
      * @param $user_id
      * @return array
      */
-    public function getUsersJobsHistory($user_id, Request $request)
+    public function storeJobEmail($data)
     {
-        $page = $request->get('page');
-        if (isset($page)) {
-            $pagenum = $page;
-        } else {
-            $pagenum = "1";
+        // Validate required job ID
+        if (empty($data['user_email_job_id'])) {
+            return ['status' => 'error', 'message' => 'Job ID is required'];
         }
-        $cuser = User::find($user_id);
-        $usertype = '';
-        $emergencyJobs = array();
-        $noramlJobs = array();
-        if ($cuser && $cuser->is('customer')) {
-            $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback', 'distance')->whereIn('status', ['completed', 'withdrawbefore24', 'withdrawafter24', 'timedout'])->orderBy('due', 'desc')->paginate(15);
-            $usertype = 'customer';
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => 0, 'pagenum' => 0];
-        } elseif ($cuser && $cuser->is('translator')) {
-            $jobs_ids = Job::getTranslatorJobsHistoric($cuser->id, 'historic', $pagenum);
-            $totaljobs = $jobs_ids->total();
-            $numpages = ceil($totaljobs / 15);
 
-            $usertype = 'translator';
-
-            $jobs = $jobs_ids;
-            $noramlJobs = $jobs_ids;
-//            $jobs['data'] = $noramlJobs;
-//            $jobs['total'] = $totaljobs;
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => $numpages, 'pagenum' => $pagenum];
+        // Find the job and handle cases where it does not exist
+        $job = Job::find($data['user_email_job_id']);
+        if (!$job) {
+            return ['status' => 'error', 'message' => 'Job not found'];
         }
+
+        // Update job details
+        $job->user_email = $data['user_email'] ?? $job->user_email;
+        $job->reference = $data['reference'] ?? '';
+
+        // Fetch associated user and update job address and instructions
+        $user = $job->user()->first();
+        if (!$user) {
+            return ['status' => 'error', 'message' => 'User associated with the job not found'];
+        }
+
+        if (isset($data['address'])) {
+            $job->address = !empty($data['address']) ? $data['address'] : $user->userMeta->address;
+            $job->instructions = !empty($data['instructions']) ? $data['instructions'] : $user->userMeta->instructions;
+            $job->town = !empty($data['town']) ? $data['town'] : $user->userMeta->city;
+        }
+
+        // Save job updates
+        $job->save();
+
+        // Determine email and name for the notification
+        $email = $job->user_email ?? $user->email;
+        $name = $user->name;
+
+        // Prepare and send email notification
+        $subject = 'Vi har mottagit er tolkbokning. Bokningsnr: #' . $job->id;
+        $sendData = [
+            'user' => $user,
+            'job' => $job,
+        ];
+
+        try {
+            $this->mailer->send($email, $name, $subject, 'emails.job-created', $sendData);
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'message' => 'Failed to send email: ' . $e->getMessage()];
+        }
+
+        // Trigger job creation event
+        $jobData = $this->jobToData($job);
+        Event::fire(new JobWasCreated($job, $jobData, '*'));
+
+        // Return success response
+        return [
+            'status' => 'success',
+            'type' => $data['user_type'] ?? null,
+            'job' => $job,
+        ];
     }
 
     /**
@@ -127,157 +189,169 @@ class BookingRepository extends BaseRepository
      */
     public function store($user, $data)
     {
-
-        $immediatetime = 5;
-        $consumer_type = $user->userMeta->consumer_type;
-        if ($user->user_type == env('CUSTOMER_ROLE_ID')) {
-            $cuser = $user;
-
-            if (!isset($data['from_language_id'])) {
-                $response['status'] = 'fail';
-                $response['message'] = "Du måste fylla in alla fält";
-                $response['field_name'] = "from_language_id";
-                return $response;
-            }
-            if ($data['immediate'] == 'no') {
-                if (isset($data['due_date']) && $data['due_date'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
-                    $response['field_name'] = "due_date";
-                    return $response;
-                }
-                if (isset($data['due_time']) && $data['due_time'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
-                    $response['field_name'] = "due_time";
-                    return $response;
-                }
-                if (!isset($data['customer_phone_type']) && !isset($data['customer_physical_type'])) {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste göra ett val här";
-                    $response['field_name'] = "customer_phone_type";
-                    return $response;
-                }
-                if (isset($data['duration']) && $data['duration'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
-                    $response['field_name'] = "duration";
-                    return $response;
-                }
-            } else {
-                if (isset($data['duration']) && $data['duration'] == '') {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Du måste fylla in alla fält";
-                    $response['field_name'] = "duration";
-                    return $response;
-                }
-            }
-            if (isset($data['customer_phone_type'])) {
-                $data['customer_phone_type'] = 'yes';
-            } else {
-                $data['customer_phone_type'] = 'no';
-            }
-
-            if (isset($data['customer_physical_type'])) {
-                $data['customer_physical_type'] = 'yes';
-                $response['customer_physical_type'] = 'yes';
-            } else {
-                $data['customer_physical_type'] = 'no';
-                $response['customer_physical_type'] = 'no';
-            }
-
-            if ($data['immediate'] == 'yes') {
-                $due_carbon = Carbon::now()->addMinute($immediatetime);
-                $data['due'] = $due_carbon->format('Y-m-d H:i:s');
-                $data['immediate'] = 'yes';
-                $data['customer_phone_type'] = 'yes';
-                $response['type'] = 'immediate';
-
-            } else {
-                $due = $data['due_date'] . " " . $data['due_time'];
-                $response['type'] = 'regular';
-                $due_carbon = Carbon::createFromFormat('m/d/Y H:i', $due);
-                $data['due'] = $due_carbon->format('Y-m-d H:i:s');
-                if ($due_carbon->isPast()) {
-                    $response['status'] = 'fail';
-                    $response['message'] = "Can't create booking in past";
-                    return $response;
-                }
-            }
-            if (in_array('male', $data['job_for'])) {
-                $data['gender'] = 'male';
-            } else if (in_array('female', $data['job_for'])) {
-                $data['gender'] = 'female';
-            }
-            if (in_array('normal', $data['job_for'])) {
-                $data['certified'] = 'normal';
-            }
-            else if (in_array('certified', $data['job_for'])) {
-                $data['certified'] = 'yes';
-            } else if (in_array('certified_in_law', $data['job_for'])) {
-                $data['certified'] = 'law';
-            } else if (in_array('certified_in_helth', $data['job_for'])) {
-                $data['certified'] = 'health';
-            }
-            if (in_array('normal', $data['job_for']) && in_array('certified', $data['job_for'])) {
-                $data['certified'] = 'both';
-            }
-            else if(in_array('normal', $data['job_for']) && in_array('certified_in_law', $data['job_for']))
-            {
-                $data['certified'] = 'n_law';
-            }
-            else if(in_array('normal', $data['job_for']) && in_array('certified_in_helth', $data['job_for']))
-            {
-                $data['certified'] = 'n_health';
-            }
-            if ($consumer_type == 'rwsconsumer')
-                $data['job_type'] = 'rws';
-            else if ($consumer_type == 'ngo')
-                $data['job_type'] = 'unpaid';
-            else if ($consumer_type == 'paid')
-                $data['job_type'] = 'paid';
-            $data['b_created_at'] = date('Y-m-d H:i:s');
-            if (isset($due))
-                $data['will_expire_at'] = TeHelper::willExpireAt($due, $data['b_created_at']);
-            $data['by_admin'] = isset($data['by_admin']) ? $data['by_admin'] : 'no';
-
-            $job = $cuser->jobs()->create($data);
-
-            $response['status'] = 'success';
-            $response['id'] = $job->id;
-            $data['job_for'] = array();
-            if ($job->gender != null) {
-                if ($job->gender == 'male') {
-                    $data['job_for'][] = 'Man';
-                } else if ($job->gender == 'female') {
-                    $data['job_for'][] = 'Kvinna';
-                }
-            }
-            if ($job->certified != null) {
-                if ($job->certified == 'both') {
-                    $data['job_for'][] = 'normal';
-                    $data['job_for'][] = 'certified';
-                } else if ($job->certified == 'yes') {
-                    $data['job_for'][] = 'certified';
-                } else {
-                    $data['job_for'][] = $job->certified;
-                }
-            }
-
-            $data['customer_town'] = $cuser->userMeta->city;
-            $data['customer_type'] = $cuser->userMeta->customer_type;
-
-            //Event::fire(new JobWasCreated($job, $data, '*'));
-
-//            $this->sendNotificationToSuitableTranslators($job->id, $data, '*');// send Push for New job posting
-        } else {
-            $response['status'] = 'fail';
-            $response['message'] = "Translator can not create booking";
+        $immediateTime = 5;
+        $consumerType = $user->userMeta->consumer_type;
+    
+        if ($user->user_type !== env('CUSTOMER_ROLE_ID')) {
+            return $this->createErrorResponse('Translator cannot create booking');
         }
-
-        return $response;
-
+    
+        if (!$this->validateRequiredFields($data)) {
+            return $this->createErrorResponse('Du måste fylla in alla fält', $this->getMissingField($data));
+        }
+    
+        $data['customer_phone_type'] = isset($data['customer_phone_type']) ? 'yes' : 'no';
+        $data['customer_physical_type'] = isset($data['customer_physical_type']) ? 'yes' : 'no';
+    
+        if ($data['immediate'] === 'yes') {
+            $data = $this->handleImmediateBooking($data, $immediateTime);
+        } else {
+            $data = $this->handleRegularBooking($data);
+            if (Carbon::createFromFormat('Y-m-d H:i:s', $data['due'])->isPast()) {
+                return $this->createErrorResponse("Can't create booking in past");
+            }
+        }
+    
+        $data = $this->processJobDetails($data, $user);
+        $job = $user->jobs()->create($data);
+    
+        return $this->prepareSuccessResponse($job, $user);
     }
+    
+    private function validateRequiredFields($data)
+    {
+        $requiredFields = ['from_language_id', 'due_date', 'due_time', 'duration'];
+        foreach ($requiredFields as $field) {
+            if (!isset($data[$field]) || $data[$field] === '') {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    private function getMissingField($data)
+    {
+        $requiredFields = ['from_language_id', 'due_date', 'due_time', 'duration'];
+        foreach ($requiredFields as $field) {
+            if (!isset($data[$field]) || $data[$field] === '') {
+                return $field;
+            }
+        }
+        return null;
+    }
+    
+    private function handleImmediateBooking($data, $immediateTime)
+    {
+        $dueCarbon = Carbon::now()->addMinutes($immediateTime);
+        $data['due'] = $dueCarbon->format('Y-m-d H:i:s');
+        $data['immediate'] = 'yes';
+        $data['customer_phone_type'] = 'yes';
+        return $data;
+    }
+    
+    private function handleRegularBooking($data)
+    {
+        $due = $data['due_date'] . " " . $data['due_time'];
+        $data['due'] = Carbon::createFromFormat('m/d/Y H:i', $due)->format('Y-m-d H:i:s');
+        $data['immediate'] = 'no';
+        return $data;
+    }
+    
+    private function processJobDetails($data, $user)
+    {
+        $data['gender'] = $this->determineGender($data['job_for']);
+        $data['certified'] = $this->determineCertification($data['job_for']);
+        $data['job_type'] = $this->determineJobType($user->userMeta->consumer_type);
+        $data['b_created_at'] = now()->format('Y-m-d H:i:s');
+    
+        if (isset($data['due'])) {
+            $data['will_expire_at'] = TeHelper::willExpireAt($data['due'], $data['b_created_at']);
+        }
+        $data['by_admin'] = $data['by_admin'] ?? 'no';
+    
+        return $data;
+    }
+    
+    private function determineGender($jobFor)
+    {
+        if (in_array('male', $jobFor)) {
+            return 'male';
+        } elseif (in_array('female', $jobFor)) {
+            return 'female';
+        }
+        return null;
+    }
+    
+    private function determineCertification($jobFor)
+    {
+        if (in_array('normal', $jobFor) && in_array('certified', $jobFor)) {
+            return 'both';
+        } elseif (in_array('normal', $jobFor) && in_array('certified_in_law', $jobFor)) {
+            return 'n_law';
+        } elseif (in_array('normal', $jobFor) && in_array('certified_in_helth', $jobFor)) {
+            return 'n_health';
+        } elseif (in_array('certified', $jobFor)) {
+            return 'yes';
+        } elseif (in_array('certified_in_law', $jobFor)) {
+            return 'law';
+        } elseif (in_array('certified_in_helth', $jobFor)) {
+            return 'health';
+        } elseif (in_array('normal', $jobFor)) {
+            return 'normal';
+        }
+        return null;
+    }
+    
+    private function determineJobType($consumerType)
+    {
+        return match ($consumerType) {
+            'rwsconsumer' => 'rws',
+            'ngo' => 'unpaid',
+            'paid' => 'paid',
+            default => 'unknown'
+        };
+    }
+    
+    private function createErrorResponse($message, $field = null)
+    {
+        return [
+            'status' => 'fail',
+            'message' => $message,
+            'field_name' => $field,
+        ];
+    }
+    
+    private function prepareSuccessResponse($job, $user)
+    {
+        $response = [
+            'status' => 'success',
+            'id' => $job->id,
+            'type' => $job->immediate === 'yes' ? 'immediate' : 'regular',
+            'customer_physical_type' => $job->customer_physical_type,
+            'job_for' => [],
+            'customer_town' => $user->userMeta->city,
+            'customer_type' => $user->userMeta->customer_type,
+        ];
+    
+        if ($job->gender) {
+            $response['job_for'][] = $job->gender === 'male' ? 'Man' : 'Kvinna';
+        }
+        if ($job->certified) {
+            $response['job_for'] = array_merge($response['job_for'], $this->mapCertification($job->certified));
+        }
+    
+        return $response;
+    }
+    
+    private function mapCertification($certification)
+    {
+        return match ($certification) {
+            'both' => ['normal', 'certified'],
+            'yes' => ['certified'],
+            default => [$certification],
+        };
+    }
+    
 
     /**
      * @param $data
@@ -285,39 +359,63 @@ class BookingRepository extends BaseRepository
      */
     public function storeJobEmail($data)
     {
-        $user_type = $data['user_type'];
-        $job = Job::findOrFail(@$data['user_email_job_id']);
-        $job->user_email = @$data['user_email'];
-        $job->reference = isset($data['reference']) ? $data['reference'] : '';
-        $user = $job->user()->get()->first();
-        if (isset($data['address'])) {
-            $job->address = ($data['address'] != '') ? $data['address'] : $user->userMeta->address;
-            $job->instructions = ($data['instructions'] != '') ? $data['instructions'] : $user->userMeta->instructions;
-            $job->town = ($data['town'] != '') ? $data['town'] : $user->userMeta->city;
+        // Validate required job ID
+        if (empty($data['user_email_job_id'])) {
+            return ['status' => 'error', 'message' => 'Job ID is required'];
         }
+
+        // Find the job and handle cases where it does not exist
+        $job = Job::find($data['user_email_job_id']);
+        if (!$job) {
+            return ['status' => 'error', 'message' => 'Job not found'];
+        }
+
+        // Update job details
+        $job->user_email = $data['user_email'] ?? $job->user_email;
+        $job->reference = $data['reference'] ?? '';
+
+        // Fetch associated user and update job address and instructions
+        $user = $job->user()->first();
+        if (!$user) {
+            return ['status' => 'error', 'message' => 'User associated with the job not found'];
+        }
+
+        if (isset($data['address'])) {
+            $job->address = !empty($data['address']) ? $data['address'] : $user->userMeta->address;
+            $job->instructions = !empty($data['instructions']) ? $data['instructions'] : $user->userMeta->instructions;
+            $job->town = !empty($data['town']) ? $data['town'] : $user->userMeta->city;
+        }
+
+        // Save job updates
         $job->save();
 
-        if (!empty($job->user_email)) {
-            $email = $job->user_email;
-            $name = $user->name;
-        } else {
-            $email = $user->email;
-            $name = $user->name;
-        }
+        // Determine email and name for the notification
+        $email = $job->user_email ?? $user->email;
+        $name = $user->name;
+
+        // Prepare and send email notification
         $subject = 'Vi har mottagit er tolkbokning. Bokningsnr: #' . $job->id;
-        $send_data = [
+        $sendData = [
             'user' => $user,
-            'job'  => $job
+            'job' => $job,
         ];
-        $this->mailer->send($email, $name, $subject, 'emails.job-created', $send_data);
 
-        $response['type'] = $user_type;
-        $response['job'] = $job;
-        $response['status'] = 'success';
-        $data = $this->jobToData($job);
-        Event::fire(new JobWasCreated($job, $data, '*'));
-        return $response;
+        try {
+            $this->mailer->send($email, $name, $subject, 'emails.job-created', $sendData);
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'message' => 'Failed to send email: ' . $e->getMessage()];
+        }
 
+        // Trigger job creation event
+        $jobData = $this->jobToData($job);
+        Event::fire(new JobWasCreated($job, $jobData, '*'));
+
+        // Return success response
+        return [
+            'status' => 'success',
+            'type' => $data['user_type'] ?? null,
+            'job' => $job,
+        ];
     }
 
     /**
@@ -479,54 +577,93 @@ class BookingRepository extends BaseRepository
      */
     public function sendNotificationTranslator($job, $data = [], $exclude_user_id)
     {
-        $users = User::all();
-        $translator_array = array();            // suitable translators (no need to delay push)
-        $delpay_translator_array = array();     // suitable translators (need to delay push)
+        // Fetch all users and initialize translator arrays
+        $users = User::where('user_type', '2')
+                    ->where('status', '1')
+                    ->where('id', '!=', $exclude_user_id)
+                    ->get();
+        $immediate = $data['immediate'] ?? 'no';
+        $translatorArray = [];
+        $delayedTranslatorArray = [];
 
-        foreach ($users as $oneUser) {
-            if ($oneUser->user_type == '2' && $oneUser->status == '1' && $oneUser->id != $exclude_user_id) { // user is translator and he is not disabled
-                if (!$this->isNeedToSendPush($oneUser->id)) continue;
-                $not_get_emergency = TeHelper::getUsermeta($oneUser->id, 'not_get_emergency');
-                if ($data['immediate'] == 'yes' && $not_get_emergency == 'yes') continue;
-                $jobs = $this->getPotentialJobIdsWithUserId($oneUser->id); // get all potential jobs of this user
-                foreach ($jobs as $oneJob) {
-                    if ($job->id == $oneJob->id) { // one potential job is the same with current job
-                        $userId = $oneUser->id;
-                        $job_for_translator = Job::assignedToPaticularTranslator($userId, $oneJob->id);
-                        if ($job_for_translator == 'SpecificJob') {
-                            $job_checker = Job::checkParticularJob($userId, $oneJob);
-                            if (($job_checker != 'userCanNotAcceptJob')) {
-                                if ($this->isNeedToDelayPush($oneUser->id)) {
-                                    $delpay_translator_array[] = $oneUser;
-                                } else {
-                                    $translator_array[] = $oneUser;
-                                }
+        foreach ($users as $user) {
+            // Skip users not eligible for push notifications
+            if (!$this->isNeedToSendPush($user->id)) continue;
+
+            // Skip users who opted out of emergency notifications
+            if ($immediate === 'yes' && TeHelper::getUsermeta($user->id, 'not_get_emergency') === 'yes') continue;
+
+            $potentialJobs = $this->getPotentialJobIdsWithUserId($user->id);
+            foreach ($potentialJobs as $potentialJob) {
+                if ($job->id === $potentialJob->id) {
+                    // Check job assignment and eligibility
+                    if (Job::assignedToPaticularTranslator($user->id, $potentialJob->id) === 'SpecificJob') {
+                        $jobChecker = Job::checkParticularJob($user->id, $potentialJob);
+                        if ($jobChecker !== 'userCanNotAcceptJob') {
+                            if ($this->isNeedToDelayPush($user->id)) {
+                                $delayedTranslatorArray[] = $user;
+                            } else {
+                                $translatorArray[] = $user;
                             }
                         }
                     }
                 }
             }
         }
+
+        // Prepare notification data
         $data['language'] = TeHelper::fetchLanguageFromJobId($data['from_language_id']);
         $data['notification_type'] = 'suitable_job';
-        $msg_contents = '';
-        if ($data['immediate'] == 'no') {
-            $msg_contents = 'Ny bokning för ' . $data['language'] . 'tolk ' . $data['duration'] . 'min ' . $data['due'];
-        } else {
-            $msg_contents = 'Ny akutbokning för ' . $data['language'] . 'tolk ' . $data['duration'] . 'min';
+        $msgContents = $this->prepareNotificationMessage($data, $immediate);
+        $msgText = ["en" => $msgContents];
+
+        // Log push notification details
+        $this->logPushNotification($job, $translatorArray, $delayedTranslatorArray, $msgText, $data);
+
+        // Send push notifications
+        $this->sendPushNotificationToSpecificUsers($translatorArray, $job->id, $data, $msgText, false);
+        $this->sendPushNotificationToSpecificUsers($delayedTranslatorArray, $job->id, $data, $msgText, true);
+    }
+
+    /**
+     * Prepare the notification message content.
+     *
+     * @param array $data
+     * @param string $immediate
+     * @return string
+     */
+    private function prepareNotificationMessage($data, $immediate)
+    {
+        if ($immediate === 'no') {
+            return 'Ny bokning för ' . $data['language'] . 'tolk ' . $data['duration'] . 'min ' . $data['due'];
         }
-        $msg_text = array(
-            "en" => $msg_contents
-        );
 
+        return 'Ny akutbokning för ' . $data['language'] . 'tolk ' . $data['duration'] . 'min';
+    }
+
+    /**
+     * Log push notification details.
+     *
+     * @param object $job
+     * @param array $translatorArray
+     * @param array $delayedTranslatorArray
+     * @param array $msgText
+     * @param array $data
+     */
+    private function logPushNotification($job, $translatorArray, $delayedTranslatorArray, $msgText, $data)
+    {
         $logger = new Logger('push_logger');
-
         $logger->pushHandler(new StreamHandler(storage_path('logs/push/laravel-' . date('Y-m-d') . '.log'), Logger::DEBUG));
         $logger->pushHandler(new FirePHPHandler());
-        $logger->addInfo('Push send for job ' . $job->id, [$translator_array, $delpay_translator_array, $msg_text, $data]);
-        $this->sendPushNotificationToSpecificUsers($translator_array, $job->id, $data, $msg_text, false);       // send new booking push to suitable translators(not delay)
-        $this->sendPushNotificationToSpecificUsers($delpay_translator_array, $job->id, $data, $msg_text, true); // send new booking push to suitable translators(need to delay)
+        $logger->addInfo('Push sent for job ' . $job->id, [
+            'immediate' => $data['immediate'],
+            'translators' => $translatorArray,
+            'delayed_translators' => $delayedTranslatorArray,
+            'message' => $msgText,
+            'data' => $data,
+        ]);
     }
+
 
     /**
      * Sends SMS to translators and retuns count of translators
@@ -535,45 +672,86 @@ class BookingRepository extends BaseRepository
      */
     public function sendSMSNotificationToTranslator($job)
     {
+        // Fetch potential translators and job poster metadata
         $translators = $this->getPotentialTranslators($job);
         $jobPosterMeta = UserMeta::where('user_id', $job->user_id)->first();
 
-        // prepare message templates
+        if (!$jobPosterMeta) {
+            Log::error('Job poster metadata not found for job ID: ' . $job->id);
+            return 0; // Exit if job poster metadata is missing
+        }
+
+        // Prepare message details
         $date = date('d.m.Y', strtotime($job->due));
         $time = date('H:i', strtotime($job->due));
         $duration = $this->convertToHoursMins($job->duration);
         $jobId = $job->id;
-        $city = $job->city ? $job->city : $jobPosterMeta->city;
+        $city = $job->city ?? $jobPosterMeta->city;
 
-        $phoneJobMessageTemplate = trans('sms.phone_job', ['date' => $date, 'time' => $time, 'duration' => $duration, 'jobId' => $jobId]);
+        // Prepare message templates
+        $phoneJobMessageTemplate = trans('sms.phone_job', [
+            'date' => $date,
+            'time' => $time,
+            'duration' => $duration,
+            'jobId' => $jobId,
+        ]);
 
-        $physicalJobMessageTemplate = trans('sms.physical_job', ['date' => $date, 'time' => $time, 'town' => $city, 'duration' => $duration, 'jobId' => $jobId]);
+        $physicalJobMessageTemplate = trans('sms.physical_job', [
+            'date' => $date,
+            'time' => $time,
+            'town' => $city,
+            'duration' => $duration,
+            'jobId' => $jobId,
+        ]);
 
-        // analyse weather it's phone or physical; if both = default to phone
-        if ($job->customer_physical_type == 'yes' && $job->customer_phone_type == 'no') {
-            // It's a physical job
-            $message = $physicalJobMessageTemplate;
-        } else if ($job->customer_physical_type == 'no' && $job->customer_phone_type == 'yes') {
-            // It's a phone job
-            $message = $phoneJobMessageTemplate;
-        } else if ($job->customer_physical_type == 'yes' && $job->customer_phone_type == 'yes') {
-            // It's both, but should be handled as phone job
-            $message = $phoneJobMessageTemplate;
-        } else {
-            // This shouldn't be feasible, so no handling of this edge case
-            $message = '';
+        // Determine the message type (phone or physical job)
+        $message = $this->determineJobMessage($job, $phoneJobMessageTemplate, $physicalJobMessageTemplate);
+
+        if (empty($message)) {
+            Log::warning('No valid message determined for job ID: ' . $job->id);
+            return 0; // Exit if no message is determined
         }
-        Log::info($message);
 
-        // send messages via sms handler
+        Log::info('Prepared message: ' . $message);
+
+        // Send messages via SMS handler
         foreach ($translators as $translator) {
-            // send message to translator
             $status = SendSMSHelper::send(env('SMS_NUMBER'), $translator->mobile, $message);
-            Log::info('Send SMS to ' . $translator->email . ' (' . $translator->mobile . '), status: ' . print_r($status, true));
+            Log::info('Sent SMS to ' . $translator->email . ' (' . $translator->mobile . '), status: ' . print_r($status, true));
         }
 
         return count($translators);
     }
+
+    /**
+     * Determine the job message type based on job properties.
+     *
+     * @param object $job
+     * @param string $phoneJobMessageTemplate
+     * @param string $physicalJobMessageTemplate
+     * @return string
+     */
+    private function determineJobMessage($job, $phoneJobMessageTemplate, $physicalJobMessageTemplate)
+    {
+        if ($job->customer_physical_type === 'yes' && $job->customer_phone_type === 'no') {
+            // Physical job
+            return $physicalJobMessageTemplate;
+        }
+
+        if ($job->customer_physical_type === 'no' && $job->customer_phone_type === 'yes') {
+            // Phone job
+            return $phoneJobMessageTemplate;
+        }
+
+        if ($job->customer_physical_type === 'yes' && $job->customer_phone_type === 'yes') {
+            // Both types, default to phone job
+            return $phoneJobMessageTemplate;
+        }
+
+        // Invalid or unsupported configuration
+        return '';
+    }
+
 
     /**
      * Function to delay the push
@@ -741,55 +919,98 @@ class BookingRepository extends BaseRepository
     public function updateJob($id, $data, $cuser)
     {
         $job = Job::find($id);
-
-        $current_translator = $job->translatorJobRel->where('cancel_at', Null)->first();
-        if (is_null($current_translator))
-            $current_translator = $job->translatorJobRel->where('completed_at', '!=', Null)->first();
-
-        $log_data = [];
-
-        $langChanged = false;
-
-        $changeTranslator = $this->changeTranslator($current_translator, $data, $job);
-        if ($changeTranslator['translatorChanged']) $log_data[] = $changeTranslator['log_data'];
-
-        $changeDue = $this->changeDue($job->due, $data['due']);
-        if ($changeDue['dateChanged']) {
-            $old_time = $job->due;
-            $job->due = $data['due'];
-            $log_data[] = $changeDue['log_data'];
+        if (!$job) {
+            return ['error' => 'Job not found'];
         }
 
-        if ($job->from_language_id != $data['from_language_id']) {
-            $log_data[] = [
+        $currentTranslator = $this->getCurrentTranslator($job);
+        $logData = [];
+        $langChanged = false;
+
+        // Handle translator change
+        $changeTranslator = $this->changeTranslator($currentTranslator, $data, $job);
+        if ($changeTranslator['translatorChanged']) {
+            $logData[] = $changeTranslator['log_data'];
+        }
+
+        // Handle due date change
+        $changeDue = $this->changeDue($job->due, $data['due']);
+        if ($changeDue['dateChanged']) {
+            $oldTime = $job->due;
+            $job->due = $data['due'];
+            $logData[] = $changeDue['log_data'];
+        }
+
+        // Handle language change
+        if ($job->from_language_id !== $data['from_language_id']) {
+            $logData[] = [
                 'old_lang' => TeHelper::fetchLanguageFromJobId($job->from_language_id),
-                'new_lang' => TeHelper::fetchLanguageFromJobId($data['from_language_id'])
+                'new_lang' => TeHelper::fetchLanguageFromJobId($data['from_language_id']),
             ];
-            $old_lang = $job->from_language_id;
+            $oldLang = $job->from_language_id;
             $job->from_language_id = $data['from_language_id'];
             $langChanged = true;
         }
 
+        // Handle status change
         $changeStatus = $this->changeStatus($job, $data, $changeTranslator['translatorChanged']);
-        if ($changeStatus['statusChanged'])
-            $log_data[] = $changeStatus['log_data'];
+        if ($changeStatus['statusChanged']) {
+            $logData[] = $changeStatus['log_data'];
+        }
 
-        $job->admin_comments = $data['admin_comments'];
+        // Update additional fields
+        $job->admin_comments = $data['admin_comments'] ?? $job->admin_comments;
+        $job->reference = $data['reference'] ?? $job->reference;
 
-        $this->logger->addInfo('USER #' . $cuser->id . '(' . $cuser->name . ')' . ' has been updated booking <a class="openjob" href="/admin/jobs/' . $id . '">#' . $id . '</a> with data:  ', $log_data);
+        // Log update
+        $this->logJobUpdate($cuser, $id, $logData);
 
-        $job->reference = $data['reference'];
+        // Save job and send notifications if necessary
+        $job->save();
 
-        if ($job->due <= Carbon::now()) {
-            $job->save();
-            return ['Updated'];
-        } else {
-            $job->save();
-            if ($changeDue['dateChanged']) $this->sendChangedDateNotification($job, $old_time);
-            if ($changeTranslator['translatorChanged']) $this->sendChangedTranslatorNotification($job, $current_translator, $changeTranslator['new_translator']);
-            if ($langChanged) $this->sendChangedLangNotification($job, $old_lang);
+        if ($job->due > Carbon::now()) {
+            $this->handleNotifications($job, $changeDue, $changeTranslator, $langChanged, $oldTime ?? null, $currentTranslator, $changeTranslator['new_translator'] ?? null, $oldLang ?? null);
+        }
+
+        return ['status' => 'success', 'message' => 'Job updated successfully'];
+    }
+
+    private function getCurrentTranslator($job)
+    {
+        return $job->translatorJobRel
+            ->where('cancel_at', null)
+            ->first() ?: $job->translatorJobRel->where('completed_at', '!=', null)->first();
+    }
+
+    private function logJobUpdate($cuser, $jobId, $logData)
+    {
+        $this->logger->addInfo(
+            sprintf(
+                'USER #%d (%s) updated booking <a class="openjob" href="/admin/jobs/%d">#%d</a> with data:',
+                $cuser->id,
+                $cuser->name,
+                $jobId,
+                $jobId
+            ),
+            $logData
+        );
+    }
+
+    private function handleNotifications($job, $changeDue, $changeTranslator, $langChanged, $oldTime, $currentTranslator, $newTranslator, $oldLang)
+    {
+        if ($changeDue['dateChanged']) {
+            $this->sendChangedDateNotification($job, $oldTime);
+        }
+
+        if ($changeTranslator['translatorChanged']) {
+            $this->sendChangedTranslatorNotification($job, $currentTranslator, $newTranslator);
+        }
+
+        if ($langChanged) {
+            $this->sendChangedLangNotification($job, $oldLang);
         }
     }
+
 
     /**
      * @param $job
@@ -1428,169 +1649,335 @@ class BookingRepository extends BaseRepository
     /*Function to accept the job with the job id*/
     public function acceptJobWithId($job_id, $cuser)
     {
-        $adminemail = config('app.admin_email');
+        $adminEmail = config('app.admin_email');
         $adminSenderEmail = config('app.admin_sender_email');
         $job = Job::findOrFail($job_id);
-        $response = array();
 
-        if (!Job::isTranslatorAlreadyBooked($job_id, $cuser->id, $job->due)) {
-            if ($job->status == 'pending' && Job::insertTranslatorJobRel($cuser->id, $job_id)) {
-                $job->status = 'assigned';
-                $job->save();
-                $user = $job->user()->get()->first();
-                $mailer = new AppMailer();
-
-                if (!empty($job->user_email)) {
-                    $email = $job->user_email;
-                    $name = $user->name;
-                } else {
-                    $email = $user->email;
-                    $name = $user->name;
-                }
-                $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
-                $data = [
-                    'user' => $user,
-                    'job'  => $job
-                ];
-                $mailer->send($email, $name, $subject, 'emails.job-accepted', $data);
-
-                $data = array();
-                $data['notification_type'] = 'job_accepted';
-                $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
-                $msg_text = array(
-                    "en" => 'Din bokning för ' . $language . ' translators, ' . $job->duration . 'min, ' . $job->due . ' har accepterats av en tolk. Vänligen öppna appen för att se detaljer om tolken.'
-                );
-                if ($this->isNeedToSendPush($user->id)) {
-                    $users_array = array($user);
-                    $this->sendPushNotificationToSpecificUsers($users_array, $job_id, $data, $msg_text, $this->isNeedToDelayPush($user->id));
-                }
-                // Your Booking is accepted sucessfully
-                $response['status'] = 'success';
-                $response['list']['job'] = $job;
-                $response['message'] = 'Du har nu accepterat och fått bokningen för ' . $language . 'tolk ' . $job->duration . 'min ' . $job->due;
-            } else {
-                // Booking already accepted by someone else
-                $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
-                $response['status'] = 'fail';
-                $response['message'] = 'Denna ' . $language . 'tolkning ' . $job->duration . 'min ' . $job->due . ' har redan accepterats av annan tolk. Du har inte fått denna tolkning';
-            }
-        } else {
-            // You already have a booking the time
-            $response['status'] = 'fail';
-            $response['message'] = 'Du har redan en bokning den tiden ' . $job->due . '. Du har inte fått denna tolkning';
+        // Check if the translator is already booked for this job
+        if (Job::isTranslatorAlreadyBooked($job_id, $cuser->id, $job->due)) {
+            return $this->createFailResponse(
+                'Du har redan en bokning den tiden ' . $job->due . '. Du har inte fått denna tolkning'
+            );
         }
-        return $response;
+
+        // Check if the job is available and assign it to the translator
+        if ($job->status === 'pending' && Job::insertTranslatorJobRel($cuser->id, $job_id)) {
+            $job->status = 'assigned';
+            $job->save();
+
+            $user = $job->user()->first();
+            $this->notifyUserAboutAcceptedJob($job, $user);
+
+            $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
+            return $this->createSuccessResponse(
+                $job,
+                'Du har nu accepterat och fått bokningen för ' . $language . 'tolk ' . $job->duration . 'min ' . $job->due
+            );
+        }
+
+        // If the job has already been accepted by another translator
+        $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
+        return $this->createFailResponse(
+            'Denna ' . $language . 'tolkning ' . $job->duration . 'min ' . $job->due . ' har redan accepterats av annan tolk. Du har inte fått denna tolkning'
+        );
     }
+
+    /**
+     * Notify the user about the accepted job.
+     *
+     * @param Job $job
+     * @param User $user
+     * @return void
+     */
+    private function notifyUserAboutAcceptedJob($job, $user)
+    {
+        $mailer = new AppMailer();
+
+        $email = $job->user_email ?: $user->email;
+        $name = $user->name;
+        $subject = 'Bekräftelse - tolk har accepterat er bokning (bokning # ' . $job->id . ')';
+        $data = [
+            'user' => $user,
+            'job'  => $job
+        ];
+
+        $mailer->send($email, $name, $subject, 'emails.job-accepted', $data);
+
+        $this->sendJobAcceptedNotification($job, $user);
+    }
+
+    /**
+     * Send a push notification about the accepted job.
+     *
+     * @param Job $job
+     * @param User $user
+     * @return void
+     */
+    private function sendJobAcceptedNotification($job, $user)
+    {
+        $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
+        $msgText = [
+            "en" => 'Din bokning för ' . $language . ' translators, ' . $job->duration . 'min, ' . $job->due . ' har accepterats av en tolk. Vänligen öppna appen för att se detaljer om tolken.'
+        ];
+
+        if ($this->isNeedToSendPush($user->id)) {
+            $usersArray = [$user];
+            $data = ['notification_type' => 'job_accepted'];
+            $this->sendPushNotificationToSpecificUsers($usersArray, $job->id, $data, $msgText, $this->isNeedToDelayPush($user->id));
+        }
+    }
+
+    /**
+     * Create a success response.
+     *
+     * @param Job $job
+     * @param string $message
+     * @return array
+     */
+    private function createSuccessResponse($job, $message)
+    {
+        return [
+            'status' => 'success',
+            'list' => ['job' => $job],
+            'message' => $message,
+        ];
+    }
+
+    /**
+     * Create a failure response.
+     *
+     * @param string $message
+     * @return array
+     */
+    private function createFailResponse($message)
+    {
+        return [
+            'status' => 'fail',
+            'message' => $message,
+        ];
+    }
+
 
     public function cancelJobAjax($data, $user)
     {
-        $response = array();
-        /*@todo
-            add 24hrs loging here.
-            If the cancelation is before 24 hours before the booking tie - supplier will be informed. Flow ended
-            if the cancelation is within 24
-            if cancelation is within 24 hours - translator will be informed AND the customer will get an addition to his number of bookings - so we will charge of it if the cancelation is within 24 hours
-            so we must treat it as if it was an executed session
-        */
-        $cuser = $user;
-        $job_id = $data['job_id'];
-        $job = Job::findOrFail($job_id);
+        $response = [];
+        $jobId = $data['job_id'];
+        $job = Job::findOrFail($jobId);
         $translator = Job::getJobsAssignedTranslatorDetail($job);
-        if ($cuser->is('customer')) {
-            $job->withdraw_at = Carbon::now();
-            if ($job->withdraw_at->diffInHours($job->due) >= 24) {
-                $job->status = 'withdrawbefore24';
-                $response['jobstatus'] = 'success';
-            } else {
-                $job->status = 'withdrawafter24';
-                $response['jobstatus'] = 'success';
-            }
-            $job->save();
-            Event::fire(new JobWasCanceled($job));
-            $response['status'] = 'success';
-            $response['jobstatus'] = 'success';
-            if ($translator) {
-                $data = array();
-                $data['notification_type'] = 'job_cancelled';
-                $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
-                $msg_text = array(
-                    "en" => 'Kunden har avbokat bokningen för ' . $language . 'tolk, ' . $job->duration . 'min, ' . $job->due . '. Var god och kolla dina tidigare bokningar för detaljer.'
-                );
-                if ($this->isNeedToSendPush($translator->id)) {
-                    $users_array = array($translator);
-                    $this->sendPushNotificationToSpecificUsers($users_array, $job_id, $data, $msg_text, $this->isNeedToDelayPush($translator->id));// send Session Cancel Push to Translaotor
-                }
-            }
+        $cancellationWindow = 24;
+
+        if ($user->is('customer')) {
+            $response = $this->handleCustomerCancellation($job, $translator, $cancellationWindow);
         } else {
-            if ($job->due->diffInHours(Carbon::now()) > 24) {
-                $customer = $job->user()->get()->first();
-                if ($customer) {
-                    $data = array();
-                    $data['notification_type'] = 'job_cancelled';
-                    $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
-                    $msg_text = array(
-                        "en" => 'Er ' . $language . 'tolk, ' . $job->duration . 'min ' . $job->due . ', har avbokat tolkningen. Vi letar nu efter en ny tolk som kan ersätta denne. Tack.'
-                    );
-                    if ($this->isNeedToSendPush($customer->id)) {
-                        $users_array = array($customer);
-                        $this->sendPushNotificationToSpecificUsers($users_array, $job_id, $data, $msg_text, $this->isNeedToDelayPush($customer->id));     // send Session Cancel Push to customer
-                    }
-                }
-                $job->status = 'pending';
-                $job->created_at = date('Y-m-d H:i:s');
-                $job->will_expire_at = TeHelper::willExpireAt($job->due, date('Y-m-d H:i:s'));
-                $job->save();
-//                Event::fire(new JobWasCanceled($job));
-                Job::deleteTranslatorJobRel($translator->id, $job_id);
-
-                $data = $this->jobToData($job);
-
-                $this->sendNotificationTranslator($job, $data, $translator->id);   // send Push all sutiable translators
-                $response['status'] = 'success';
-            } else {
-                $response['status'] = 'fail';
-                $response['message'] = 'Du kan inte avboka en bokning som sker inom 24 timmar genom DigitalTolk. Vänligen ring på +46 73 75 86 865 och gör din avbokning over telefon. Tack!';
-            }
+            $response = $this->handleTranslatorCancellation($job, $translator, $cancellationWindow);
         }
+
         return $response;
     }
+
+    /**
+     * Handle job cancellation by a customer.
+     *
+     * @param Job $job
+     * @param Translator|null $translator
+     * @param int $cancellationWindow
+     * @return array
+     */
+    private function handleCustomerCancellation($job, $translator, $cancellationWindow)
+    {
+        $response = [];
+        $job->withdraw_at = Carbon::now();
+
+        if ($job->withdraw_at->diffInHours($job->due) >= $cancellationWindow) {
+            $job->status = 'withdrawbefore24';
+        } else {
+            $job->status = 'withdrawafter24';
+        }
+
+        $job->save();
+        Event::fire(new JobWasCanceled($job));
+
+        $response['status'] = 'success';
+        $response['jobstatus'] = 'success';
+
+        if ($translator) {
+            $this->sendCancellationNotificationToTranslator($job, $translator);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Handle job cancellation by a translator.
+     *
+     * @param Job $job
+     * @param Translator|null $translator
+     * @param int $cancellationWindow
+     * @return array
+     */
+    private function handleTranslatorCancellation($job, $translator, $cancellationWindow)
+    {
+        $response = [];
+
+        if ($job->due->diffInHours(Carbon::now()) > $cancellationWindow) {
+            $customer = $job->user()->first();
+
+            if ($customer) {
+                $this->sendCancellationNotificationToCustomer($job, $customer);
+            }
+
+            $job->status = 'pending';
+            $job->created_at = Carbon::now();
+            $job->will_expire_at = TeHelper::willExpireAt($job->due, Carbon::now());
+            $job->save();
+
+            if ($translator) {
+                Job::deleteTranslatorJobRel($translator->id, $job->id);
+            }
+
+            $data = $this->jobToData($job);
+            $this->sendNotificationTranslator($job, $data, $translator->id ?? null);
+
+            $response['status'] = 'success';
+        } else {
+            $response['status'] = 'fail';
+            $response['message'] = 'Du kan inte avboka en bokning som sker inom 24 timmar genom DigitalTolk. Vänligen ring på +46 73 75 86 865 och gör din avbokning over telefon. Tack!';
+        }
+
+        return $response;
+    }
+
+    /**
+     * Send a cancellation notification to the translator.
+     *
+     * @param Job $job
+     * @param Translator $translator
+     * @return void
+     */
+    private function sendCancellationNotificationToTranslator($job, $translator)
+    {
+        $data = ['notification_type' => 'job_cancelled'];
+        $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
+        $msgText = [
+            "en" => 'Kunden har avbokat bokningen för ' . $language . 'tolk, ' . $job->duration . 'min, ' . $job->due . '. Var god och kolla dina tidigare bokningar för detaljer.'
+        ];
+
+        if ($this->isNeedToSendPush($translator->id)) {
+            $this->sendPushNotificationToSpecificUsers([$translator], $job->id, $data, $msgText, $this->isNeedToDelayPush($translator->id));
+        }
+    }
+
+    /**
+     * Send a cancellation notification to the customer.
+     *
+     * @param Job $job
+     * @param Customer $customer
+     * @return void
+     */
+    private function sendCancellationNotificationToCustomer($job, $customer)
+    {
+        $data = ['notification_type' => 'job_cancelled'];
+        $language = TeHelper::fetchLanguageFromJobId($job->from_language_id);
+        $msgText = [
+            "en" => 'Er ' . $language . 'tolk, ' . $job->duration . 'min ' . $job->due . ', har avbokat tolkningen. Vi letar nu efter en ny tolk som kan ersätta denne. Tack.'
+        ];
+
+        if ($this->isNeedToSendPush($customer->id)) {
+            $this->sendPushNotificationToSpecificUsers([$customer], $job->id, $data, $msgText, $this->isNeedToDelayPush($customer->id));
+        }
+    }
+
 
     /*Function to get the potential jobs for paid,rws,unpaid translators*/
     public function getPotentialJobs($cuser)
     {
-        $cuser_meta = $cuser->userMeta;
-        $job_type = 'unpaid';
-        $translator_type = $cuser_meta->translator_type;
-        if ($translator_type == 'professional')
-            $job_type = 'paid';   /*show all jobs for professionals.*/
-        else if ($translator_type == 'rwstranslator')
-            $job_type = 'rws';  /* for rwstranslator only show rws jobs. */
-        else if ($translator_type == 'volunteer')
-            $job_type = 'unpaid';  /* for volunteers only show unpaid jobs. */
+        $cuserMeta = $cuser->userMeta;
+        $jobType = $this->determineJobType($cuserMeta->translator_type);
+        $userLanguages = $this->getUserLanguages($cuser->id);
+        $gender = $cuserMeta->gender;
+        $translatorLevel = $cuserMeta->translator_level;
 
-        $languages = UserLanguages::where('user_id', '=', $cuser->id)->get();
-        $userlanguage = collect($languages)->pluck('lang_id')->all();
-        $gender = $cuser_meta->gender;
-        $translator_level = $cuser_meta->translator_level;
-        /*Call the town function for checking if the job physical, then translators in one town can get job*/
-        $job_ids = Job::getJobs($cuser->id, $job_type, 'pending', $userlanguage, $gender, $translator_level);
-        foreach ($job_ids as $k => $job) {
-            $jobuserid = $job->user_id;
+        // Fetch potential jobs based on user preferences and attributes
+        $jobIds = Job::getJobs($cuser->id, $jobType, 'pending', $userLanguages, $gender, $translatorLevel);
+
+        $filteredJobs = $this->filterJobs($jobIds, $cuser);
+
+        return $filteredJobs;
+    }
+
+    /**
+     * Determine the job type based on the translator type.
+     *
+     * @param string $translatorType
+     * @return string
+     */
+    private function determineJobType($translatorType)
+    {
+        switch ($translatorType) {
+            case 'professional':
+                return 'paid';
+            case 'rwstranslator':
+                return 'rws';
+            case 'volunteer':
+            default:
+                return 'unpaid';
+        }
+    }
+
+    /**
+     * Retrieve the user's preferred languages.
+     *
+     * @param int $userId
+     * @return array
+     */
+    private function getUserLanguages($userId)
+    {
+        return UserLanguages::where('user_id', $userId)->pluck('lang_id')->all();
+    }
+
+    /**
+     * Filter jobs based on specific criteria.
+     *
+     * @param Collection $jobIds
+     * @param object $cuser
+     * @return Collection
+     */
+    private function filterJobs($jobIds, $cuser)
+    {
+        foreach ($jobIds as $key => $job) {
             $job->specific_job = Job::assignedToPaticularTranslator($cuser->id, $job->id);
             $job->check_particular_job = Job::checkParticularJob($cuser->id, $job);
-            $checktown = Job::checkTowns($jobuserid, $cuser->id);
+            $checkTown = Job::checkTowns($job->user_id, $cuser->id);
 
-            if($job->specific_job == 'SpecificJob')
-                if ($job->check_particular_job == 'userCanNotAcceptJob')
-                unset($job_ids[$k]);
+            // Exclude jobs that the user cannot accept
+            if ($job->specific_job === 'SpecificJob' && $job->check_particular_job === 'userCanNotAcceptJob') {
+                unset($jobIds[$key]);
+                continue;
+            }
 
-            if (($job->customer_phone_type == 'no' || $job->customer_phone_type == '') && $job->customer_physical_type == 'yes' && $checktown == false) {
-                unset($job_ids[$k]);
+            // Exclude physical jobs not within the same town
+            if ($this->isPhysicalJobOutsideTown($job, $checkTown)) {
+                unset($jobIds[$key]);
             }
         }
-//        $jobs = TeHelper::convertJobIdsInObjs($job_ids);
-        return $job_ids;
+
+        return $jobIds;
     }
+
+    /**
+     * Determine if a job is physical and outside the allowed town.
+     *
+     * @param object $job
+     * @param bool $checkTown
+     * @return bool
+     */
+    private function isPhysicalJobOutsideTown($job, $checkTown)
+    {
+        return ($job->customer_phone_type === 'no' || empty($job->customer_phone_type))
+            && $job->customer_physical_type === 'yes'
+            && !$checkTown;
+    }
+
 
     public function endJob($post_data)
     {
